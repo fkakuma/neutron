@@ -623,7 +623,7 @@ class TestOvsNeutronAgent(base.BaseTestCase):
         with contextlib.nested(
             mock.patch.object(self.agent.tun_br, 'add_flow'),
             mock.patch.object(self.agent.tun_br, 'delete_flows'),
-            mock.patch.object(self.agent, 'setup_tunnel_port'),
+            mock.patch.object(self.agent, '_setup_tunnel_port'),
             mock.patch.object(self.agent, 'cleanup_tunnel_port')
         ) as (add_flow_fn, del_flow_fn, add_tun_fn, clean_tun_fn):
             self.agent.fdb_add(None, fdb_entry)
@@ -663,7 +663,7 @@ class TestOvsNeutronAgent(base.BaseTestCase):
         with contextlib.nested(
             mock.patch.object(self.agent.tun_br, 'add_flow'),
             mock.patch.object(self.agent.tun_br, 'mod_flow'),
-            mock.patch.object(self.agent, 'setup_tunnel_port'),
+            mock.patch.object(self.agent, '_setup_tunnel_port'),
         ) as (add_flow_fn, mod_flow_fn, add_tun_fn):
             self.agent.fdb_add(None, fdb_entry)
             self.assertFalse(add_tun_fn.called)
@@ -733,7 +733,7 @@ class TestOvsNeutronAgent(base.BaseTestCase):
         with contextlib.nested(
             mock.patch.object(self.agent.tun_br, 'add_flow'),
             mock.patch.object(self.agent.tun_br, 'mod_flow'),
-            mock.patch.object(self.agent, 'setup_tunnel_port')
+            mock.patch.object(self.agent, '_setup_tunnel_port')
         ) as (add_flow_fn, mod_flow_fn, add_tun_fn):
             self.agent.fdb_add(None, fdb_entry)
             self.assertFalse(add_tun_fn.called)
@@ -817,13 +817,13 @@ class TestOvsNeutronAgent(base.BaseTestCase):
                                        constants.DEFAULT_OVSDBMON_RESPAWN)
         mock_loop.assert_called_once_with(polling_manager=mock.ANY)
 
-    def test_setup_tunnel_port_error_negative(self):
+    def test__setup_tunnel_port_error_negative(self):
         with contextlib.nested(
             mock.patch.object(self.agent.tun_br, 'add_tunnel_port',
                               return_value='-1'),
             mock.patch.object(ovs_neutron_agent.LOG, 'error')
         ) as (add_tunnel_port_fn, log_error_fn):
-            ofport = self.agent.setup_tunnel_port(
+            ofport = self.agent._setup_tunnel_port(
                 'gre-1', 'remote_ip', p_const.TYPE_GRE)
             add_tunnel_port_fn.assert_called_once_with(
                 'gre-1', 'remote_ip', self.agent.local_ip, p_const.TYPE_GRE,
@@ -833,14 +833,14 @@ class TestOvsNeutronAgent(base.BaseTestCase):
                 {'type': p_const.TYPE_GRE, 'ip': 'remote_ip'})
             self.assertEqual(ofport, 0)
 
-    def test_setup_tunnel_port_error_not_int(self):
+    def test__setup_tunnel_port_error_not_int(self):
         with contextlib.nested(
             mock.patch.object(self.agent.tun_br, 'add_tunnel_port',
                               return_value=None),
             mock.patch.object(ovs_neutron_agent.LOG, 'exception'),
             mock.patch.object(ovs_neutron_agent.LOG, 'error')
         ) as (add_tunnel_port_fn, log_exc_fn, log_error_fn):
-            ofport = self.agent.setup_tunnel_port(
+            ofport = self.agent._setup_tunnel_port(
                 'gre-1', 'remote_ip', p_const.TYPE_GRE)
             add_tunnel_port_fn.assert_called_once_with(
                 'gre-1', 'remote_ip', self.agent.local_ip, p_const.TYPE_GRE,
@@ -853,14 +853,14 @@ class TestOvsNeutronAgent(base.BaseTestCase):
                 {'type': p_const.TYPE_GRE, 'ip': 'remote_ip'})
             self.assertEqual(ofport, 0)
 
-    def test_setup_tunnel_port_error_negative_df_disabled(self):
+    def test__setup_tunnel_port_error_negative_df_disabled(self):
         with contextlib.nested(
             mock.patch.object(self.agent.tun_br, 'add_tunnel_port',
                               return_value='-1'),
             mock.patch.object(ovs_neutron_agent.LOG, 'error')
         ) as (add_tunnel_port_fn, log_error_fn):
             self.agent.dont_fragment = False
-            ofport = self.agent.setup_tunnel_port(
+            ofport = self.agent._setup_tunnel_port(
                 'gre-1', 'remote_ip', p_const.TYPE_GRE)
             add_tunnel_port_fn.assert_called_once_with(
                 'gre-1', 'remote_ip', self.agent.local_ip, p_const.TYPE_GRE,
@@ -876,25 +876,25 @@ class TestOvsNeutronAgent(base.BaseTestCase):
         with contextlib.nested(
             mock.patch.object(self.agent.plugin_rpc, 'tunnel_sync',
                               return_value=fake_tunnel_details),
-            mock.patch.object(self.agent, 'setup_tunnel_port')
-        ) as (tunnel_sync_rpc_fn, setup_tunnel_port_fn):
+            mock.patch.object(self.agent, '_setup_tunnel_port')
+        ) as (tunnel_sync_rpc_fn, _setup_tunnel_port_fn):
             self.agent.tunnel_types = ['gre']
             self.agent.tunnel_sync()
             expected_calls = [mock.call('gre-42', '100.101.102.103', 'gre')]
-            setup_tunnel_port_fn.assert_has_calls(expected_calls)
+            _setup_tunnel_port_fn.assert_has_calls(expected_calls)
 
     def test_tunnel_sync_with_ml2_plugin(self):
         fake_tunnel_details = {'tunnels': [{'ip_address': '100.101.31.15'}]}
         with contextlib.nested(
             mock.patch.object(self.agent.plugin_rpc, 'tunnel_sync',
                               return_value=fake_tunnel_details),
-            mock.patch.object(self.agent, 'setup_tunnel_port')
-        ) as (tunnel_sync_rpc_fn, setup_tunnel_port_fn):
+            mock.patch.object(self.agent, '_setup_tunnel_port')
+        ) as (tunnel_sync_rpc_fn, _setup_tunnel_port_fn):
             self.agent.tunnel_types = ['vxlan']
             self.agent.tunnel_sync()
             expected_calls = [mock.call('vxlan-64651f0f',
                                         '100.101.31.15', 'vxlan')]
-            setup_tunnel_port_fn.assert_has_calls(expected_calls)
+            _setup_tunnel_port_fn.assert_has_calls(expected_calls)
 
     def test_tunnel_sync_invalid_ip_address(self):
         fake_tunnel_details = {'tunnels': [{'ip_address': '300.300.300.300'},
@@ -902,24 +902,24 @@ class TestOvsNeutronAgent(base.BaseTestCase):
         with contextlib.nested(
             mock.patch.object(self.agent.plugin_rpc, 'tunnel_sync',
                               return_value=fake_tunnel_details),
-            mock.patch.object(self.agent, 'setup_tunnel_port')
-        ) as (tunnel_sync_rpc_fn, setup_tunnel_port_fn):
+            mock.patch.object(self.agent, '_setup_tunnel_port')
+        ) as (tunnel_sync_rpc_fn, _setup_tunnel_port_fn):
             self.agent.tunnel_types = ['vxlan']
             self.agent.tunnel_sync()
-            setup_tunnel_port_fn.assert_called_once_with('vxlan-64646464',
-                                                         '100.100.100.100',
-                                                         'vxlan')
+            _setup_tunnel_port_fn.assert_called_once_with('vxlan-64646464',
+                                                          '100.100.100.100',
+                                                          'vxlan')
 
     def test_tunnel_update(self):
         kwargs = {'tunnel_ip': '10.10.10.10',
                   'tunnel_type': 'gre'}
-        self.agent.setup_tunnel_port = mock.Mock()
+        self.agent._setup_tunnel_port = mock.Mock()
         self.agent.enable_tunneling = True
         self.agent.tunnel_types = ['gre']
         self.agent.l2_pop = False
         self.agent.tunnel_update(context=None, **kwargs)
         expected_calls = [mock.call('gre-0a0a0a0a', '10.10.10.10', 'gre')]
-        self.agent.setup_tunnel_port.assert_has_calls(expected_calls)
+        self.agent._setup_tunnel_port.assert_has_calls(expected_calls)
 
     def test_ovs_restart(self):
         reply2 = {'current': set(['tap0']),
