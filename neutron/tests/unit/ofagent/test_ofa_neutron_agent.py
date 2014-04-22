@@ -232,20 +232,21 @@ class TestOFANeutronAgent(OFAAgentTestCase):
                        'FixedIntervalLoopingCall',
                        new=MockFixedIntervalLoopingCall)):
             self.agent = self.mod_agent.OFANeutronAgent(self.ryuapp, **kwargs)
-            self.agent.tun_br = mock.Mock()
-            self.datapath = mock.Mock()
-            self.ofproto = mock.Mock()
-            self.datapath.ofproto = self.ofproto
-            self.ofproto.OFPVID_PRESENT = 0x1000
-            self.ofparser = mock.Mock()
-            self.datapath.ofproto_parser = self.ofparser
-            self.ofparser.OFPMatch = mock.Mock()
-            self.ofparser.OFPMatch.return_value = mock.Mock()
-            self.ofparser.OFPFlowMod = mock.Mock()
-            self.ofparser.OFPFlowMod.return_value = mock.Mock()
-            self.agent.int_br.ofparser = self.ofparser
-            self.agent.tun_br.datapath = self.datapath
-
+        self.agent.tun_br = mock.Mock()
+        self.tun_br = mock.Mock()
+        self.datapath = mock.Mock()
+        self.ofproto = mock.Mock()
+        self.datapath.ofproto = self.ofproto
+        self.ofproto.OFPVID_PRESENT = 0x1000
+        self.ofparser = mock.Mock()
+        self.datapath.ofproto_parser = self.ofparser
+        self.ofparser.OFPMatch = mock.Mock()
+        self.ofparser.OFPMatch.return_value = mock.Mock()
+        self.ofparser.OFPFlowMod = mock.Mock()
+        self.ofparser.OFPFlowMod.return_value = mock.Mock()
+        self.agent.int_br.ofparser = self.ofparser
+        self.agent.tun_br.datapath = self.datapath
+        self.tun_br.datapath = self.datapath
         self.agent.sg_agent = mock.Mock()
 
     def _create_tunnel_port_name(self, tunnel_ip, tunnel_type):
@@ -712,6 +713,46 @@ class TestOFANeutronAgent(OFAAgentTestCase):
             self.agent.fdb_remove(None, fdb_entry)
             del_port_fn.assert_called_once_with(self.tun_name2)
 
+    def test_add_arp_table_entry(self):
+        self._prepare_l2_pop_ofports()
+        fdb_entry = {self.net1:
+                     {'network_type': self.tunnel_type,
+                      'segment_id': 'tun1',
+                      'ports': {self.ip1: [['mac1', 'ip1']],
+                                self.ip2: [['mac2', 'ip2']]}}}
+        with contextlib.nested(
+            mock.patch.object(self.agent, 'ryu_send_msg'),
+            mock.patch.object(self.agent, 'setup_tunnel_port')
+        ) as (ryu_send_msg_fn, add_tun_fn):
+            self.agent.fdb_add(None, fdb_entry)
+            calls = [
+                mock.call(self.agent.local_vlan_map[self.net1].vlan,
+                          'ip1', 'mac1'),
+                mock.call(self.agent.local_vlan_map[self.net1].vlan,
+                          'ip2', 'mac2')
+            ]
+            self.assertEqual(self.ryuapp.add_arp_table_entry.call_args_list,
+                             calls)
+
+    def test_del_arp_table_entry(self):
+        self._prepare_l2_pop_ofports()
+        fdb_entry = {self.net1:
+                     {'network_type': self.tunnel_type,
+                      'segment_id': 'tun1',
+                      'ports': {self.ip1: [['mac1', 'ip1']],
+                                self.ip2: [['mac2', 'ip2']]}}}
+        with contextlib.nested(
+            mock.patch.object(self.agent, 'ryu_send_msg'),
+            mock.patch.object(self.agent, 'setup_tunnel_port')
+        ) as (ryu_send_msg_fn, add_tun_fn):
+            self.agent.fdb_remove(None, fdb_entry)
+            calls = [
+                mock.call(self.agent.local_vlan_map[self.net1].vlan, 'ip1'),
+                mock.call(self.agent.local_vlan_map[self.net1].vlan, 'ip2')
+            ]
+            self.assertEqual(self.ryuapp.del_arp_table_entry.call_args_list,
+                             calls)
+
     def test_recl_lv_port_to_preserve(self):
         self._prepare_l2_pop_ofports()
         self.agent.enable_tunneling = True
@@ -795,6 +836,21 @@ class TestOFANeutronAgent(OFAAgentTestCase):
                 self.agent.context,
                 self.agent.local_ip,
                 self.agent.tunnel_types[0])
+
+    def test_setup_tunnel_br(self):
+        with contextlib.nested(
+            mock.patch.object(self.agent.int_br,
+                              'add_patch_port', return_value='1'),
+            mock.patch.object(self.tun_br,
+                              'add_patch_port', return_value='2'),
+            mock.patch.object(self.mod_agent, 'OVSBridge',
+                              return_value=self.tun_br),
+            mock.patch.object(self.agent,
+                              '_tun_br_output_arp_packet_to_controller')
+        ) as (int_add_patch_port, tun_add_patch_port,
+              ovs_br_class, tun_output_ctrl):
+            self.agent.setup_tunnel_br(cfg.CONF.OVS.tunnel_bridge)
+            tun_output_ctrl.assert_called_once_with(self.tun_br)
 
 
 class AncillaryBridgesTest(OFAAgentTestCase):

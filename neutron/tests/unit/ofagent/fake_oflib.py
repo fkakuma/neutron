@@ -19,8 +19,22 @@ import mock
 def patch_fake_oflib_of():
     ryu_mod = mock.Mock()
     ryu_base_mod = ryu_mod.base
+    ryu_ctrl_mod = ryu_mod.controller
+    ryu_hand_mod = ryu_ctrl_mod.handler
+    ryu_ctrl_ofpevt = ryu_ctrl_mod.ofp_event
+    ryu_hand_mod.MAIN_DISPATCHER = 'main'
+    ryu_ctrl_hand_setevc = ryu_hand_mod.set_ev_cls
     ryu_lib_mod = ryu_mod.lib
+    ryu_lib_dpid = ryu_lib_mod.dpid
     ryu_lib_hub = ryu_lib_mod.hub
+    ryu_packet_mod = ryu_lib_mod.packet
+    ryu_packet_arp = ryu_packet_mod.arp
+    ryu_packet_arp.ARP_REQUEST = 1
+    ryu_packet_arp.ARP_REQUEST = 2
+    ryu_packet_eth = ryu_packet_mod.ethernet
+    ryu_packet_vlan = ryu_packet_mod.vlan
+    ryu_packet_packet_mod = ryu_packet_mod.packet
+    ryu_packet_packet_Packet = ryu_packet_packet_mod.Packet
     ryu_ofproto_mod = ryu_mod.ofproto
     ryu_ofproto_of13 = ryu_ofproto_mod.ofproto_v1_3
     ryu_ofproto_of13.OFPTT_ALL = 0xff
@@ -32,13 +46,25 @@ def patch_fake_oflib_of():
     ryu_app_mod = ryu_mod.app
     ryu_app_ofctl_mod = ryu_app_mod.ofctl
     ryu_ofctl_api = ryu_app_ofctl_mod.api
-    return mock.patch.dict('sys.modules',
-                           {'ryu': ryu_mod,
-                            'ryu.base': ryu_base_mod,
-                            'ryu.lib': ryu_lib_mod,
-                            'ryu.lib.hub': ryu_lib_hub,
-                            'ryu.ofproto': ryu_ofproto_mod,
-                            'ryu.ofproto.ofproto_v1_3': ryu_ofproto_of13,
-                            'ryu.app': ryu_app_mod,
-                            'ryu.app.ofctl': ryu_app_ofctl_mod,
-                            'ryu.app.ofctl.api': ryu_ofctl_api})
+    return mock.patch.dict(
+        'sys.modules',
+        {'ryu': ryu_mod,
+         'ryu.base': ryu_base_mod,
+         'ryu.controller': ryu_ctrl_mod,
+         'ryu.controller.handler': ryu_hand_mod,
+         'ryu.controller.handler.set_ev_cls': ryu_ctrl_hand_setevc,
+         'ryu.controller.ofp_event': ryu_ctrl_ofpevt,
+         'ryu.lib': ryu_lib_mod,
+         'ryu.lib.dpid': ryu_lib_dpid,
+         'ryu.lib.hub': ryu_lib_hub,
+         'ryu.lib.packet': ryu_packet_mod,
+         'ryu.lib.packet.arp': ryu_packet_arp,
+         'ryu.lib.packet.ethernet': ryu_packet_eth,
+         'ryu.lib.packet.vlan': ryu_packet_vlan,
+         'ryu.lib.packet.packet': ryu_packet_packet_mod,
+         'ryu.lib.packet.packet.Packet': ryu_packet_packet_Packet,
+         'ryu.ofproto': ryu_ofproto_mod,
+         'ryu.ofproto.ofproto_v1_3': ryu_ofproto_of13,
+         'ryu.app': ryu_app_mod,
+         'ryu.app.ofctl': ryu_app_ofctl_mod,
+         'ryu.app.ofctl.api': ryu_ofctl_api})
