@@ -23,7 +23,16 @@ import netaddr
 from oslo.config import cfg
 from ryu.app.ofctl import api as ryu_api
 from ryu.base import app_manager
+from ryu.controller.handler import MAIN_DISPATCHER
+from ryu.controller.handler import set_ev_cls
+from ryu.controller import ofp_event
+from ryu.lib import dpid as dpid_lib
 from ryu.lib import hub
+from ryu.lib.packet import arp
+from ryu.lib.packet import ethernet
+from ryu.lib.packet import packet
+from ryu.lib.packet import vlan
+from ryu.ofproto import ether as ether
 from ryu.ofproto import ofproto_v1_3 as ryu_ofp13
 
 from neutron.agent import l2population_rpc
@@ -160,6 +169,11 @@ class OFASecurityGroupAgent(sg_rpc.SecurityGroupAgentRpcMixin):
 class OFANeutronAgentRyuApp(app_manager.RyuApp):
     OFP_VERSIONS = [ryu_ofp13.OFP_VERSION]
 
+    def __init__(self, *args, **kwargs):
+        super(OFANeutronAgentRyuApp, self).__init__(*args, **kwargs)
+        # metadata -> ip_addr -> hw_addr
+        self._arp_tbl = {}
+
     def start(self):
 
         super(OFANeutronAgentRyuApp, self).start()
@@ -187,6 +201,109 @@ class OFANeutronAgentRyuApp(app_manager.RyuApp):
         # Start everything.
         LOG.info(_("Agent initialized successfully, now running... "))
         agent.daemon_loop()
+
+    @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
+    def _packet_in_handler(self, ev):
+        """Check a packet-in message.
+
+           Build and output an arp reply if a packet-in message is
+           an arp packet.
+        """
+        msg = ev.msg
+        datapath = msg.datapath
+        port = msg.match['in_port']
+        pkt = packet.Packet(msg.data)
+        LOG.debug(_("packet-in dpid %(dpid)s in_port %(port)s pkt %(pkt)s"),
+                  {'dpid': dpid_lib.dpid_to_str(datapath.id),
+                   'port': port, 'pkt': pkt})
+        pkt_ethernet = pkt.get_protocol(ethernet.ethernet)
+        if not pkt_ethernet:
+            LOG.debug(_("ignoring non-ethernet packet"))
+            return
+        pkt_vlan = pkt.get_protocol(vlan.vlan)
+        if not pkt_vlan:
+            LOG.debug(_("ignoring non-vlan packet"))
+            return
+        pkt_arp = pkt.get_protocol(arp.arp)
+        if not pkt_arp:
+            LOG.debug(_("ignoring non-arp packet"))
+            return
+        vid = pkt_vlan.vid
+        arptbl = self._arp_tbl.get(vid)
+        if arptbl is None:
+            LOG.debug(_("ignoring unknown vid %s"), vid)
+            return
+        if self._respond_arp(datapath, port, arptbl,
+                             pkt_ethernet, pkt_vlan, pkt_arp):
+            return
+        # flood
+        ofp = datapath.ofproto
+        ofpp = datapath.ofproto_parser
+        actions = [ofpp.OFPActionOutput(port=ofp.OFPP_FLOOD)]
+        out = ofpp.OFPPacketOut(datapath=datapath,
+                                buffer_id=msg.buffer_id,
+                                in_port=port,
+                                actions=actions,
+                                data=msg.data)
+        ryu_api.send_msg(self, out)
+
+    def _respond_arp(self, datapath, port, arptbl,
+                     pkt_ethernet, pkt_vlan, pkt_arp):
+        if pkt_arp.opcode != arp.ARP_REQUEST:
+            LOG.debug(_("flooding unknown arp op %s"), pkt_arp.opcode)
+            return False
+        ip_addr = pkt_arp.dst_ip
+        hw_addr = arptbl.get(ip_addr)
+        if hw_addr is None:
+            LOG.debug(_("flooding arp request for %s"), ip_addr)
+            return False
+        LOG.debug(_("responding arp request %(ip_addr)s -> %(hw_addr)s"),
+                  {'ip_addr': ip_addr, 'hw_addr': hw_addr})
+        pkt = packet.Packet()
+        pkt.add_protocol(ethernet.ethernet(ethertype=pkt_ethernet.ethertype,
+                                           dst=pkt_ethernet.src,
+                                           src=hw_addr))
+        pkt.add_protocol(vlan.vlan(cfi=pkt_vlan.cfi,
+                                   ethertype=pkt_vlan.ethertype,
+                                   pcp=pkt_vlan.pcp,
+                                   vid=pkt_vlan.vid))
+        pkt.add_protocol(arp.arp(opcode=arp.ARP_REPLY,
+                                 src_mac=hw_addr,
+                                 src_ip=ip_addr,
+                                 dst_mac=pkt_arp.src_mac,
+                                 dst_ip=pkt_arp.src_ip))
+        self._send_packet(datapath, port, pkt)
+        return True
+
+    def _send_packet(self, datapath, port, pkt):
+        ofp = datapath.ofproto
+        ofpp = datapath.ofproto_parser
+
+        LOG.debug(_("packet-out %s"), pkt)
+
+        pkt.serialize()
+        data = pkt.data
+        actions = [ofpp.OFPActionOutput(port=port)]
+        out = ofpp.OFPPacketOut(datapath=datapath,
+                                buffer_id=ofp.OFP_NO_BUFFER,
+                                in_port=ofp.OFPP_CONTROLLER,
+                                actions=actions,
+                                data=data)
+        ryu_api.send_msg(self, out)
+
+    def add_arp_table_entry(self, vid, ip, mac):
+        LOG.debug(_("added arp table entry: "
+                    "vid %(vid)s ip %(ip)s mac %(mac)s"),
+                  {'vid': vid, 'ip': ip, 'mac': mac})
+        if vid in self._arp_tbl:
+            self._arp_tbl[vid][ip] = mac
+        else:
+            self._arp_tbl[vid] = {ip: mac}
+
+    def del_arp_table_entry(self, vid, ip):
+        LOG.debug(_("deleted arp table entry: vid %(vid)s ip %(ip)s"),
+                  {'vid': vid, 'ip': ip})
+        del self._arp_tbl[vid][ip]
 
 
 class OFANeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
@@ -440,6 +557,8 @@ class OFANeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
             lvm.tun_ofports.add(ofport)
             self._fdb_add_flooding_flow(lvm)
         else:
+            self.ryuapp.add_arp_table_entry(
+                lvm.vlan, port_info[1], port_info[0])
             match = ofpp.OFPMatch(
                 vlan_vid=int(lvm.vlan) | ofp.OFPVID_PRESENT,
                 eth_dst=port_info[0])
@@ -478,6 +597,7 @@ class OFANeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
             # Check if this tunnel port is still used
             self.cleanup_tunnel_port(ofport, lvm.network_type)
         else:
+            self.ryuapp.del_arp_table_entry(lvm.vlan, port_info[1])
             match = ofpp.OFPMatch(
                 vlan_vid=int(lvm.vlan) | ofp.OFPVID_PRESENT,
                 eth_dst=port_info[0])
@@ -488,6 +608,45 @@ class OFANeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
                                   out_port=ofp.OFPP_ANY,
                                   match=match)
             self.ryu_send_msg(msg)
+
+    def _fdb_chg_ip(self, context, fdb_entries):
+        '''fdb update when an IP of a port is updated.
+
+        The ML2 l2-pop mechanism driver send an fdb update rpc message when an
+        IP of a port is updated.
+
+        :param context: RPC context.
+        :param fdb_entries: fdb dicts that contain all mac/IP informations per
+                            agent and network.
+                               {'net1':
+                                {'agent_ip':
+                                 {'before': [[mac, ip]],
+                                  'after': [[mac, ip]]
+                                 }
+                                }
+                                'net2':
+                                ...
+                               }
+        '''
+        LOG.debug(_("update chg_ip received"))
+
+        for network_id, agent_ports in fdb_entries.items():
+            lvm = self.local_vlan_map.get(network_id)
+            if not lvm:
+                continue
+
+            for agent_ip, state in agent_ports.items():
+                if agent_ip == self.local_ip:
+                    continue
+
+                after = state.get('after')
+                for mac, ip in after:
+                    self.ryuapp.add_arp_table_entry(
+                        lvm.vlan, ip, mac)
+
+                before = state.get('before')
+                for mac, ip in before:
+                    self.ryuapp.del_arp_table_entry(lvm.vlan, ip)
 
     def fdb_update(self, context, fdb_entries):
         LOG.debug(_("fdb_update received"))
@@ -859,6 +1018,22 @@ class OFANeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
         msg = br.ofparser.OFPFlowMod(br.datapath, priority=0)
         self.ryu_send_msg(msg)
 
+    def _tun_br_output_arp_packet_to_controller(self, br):
+        datapath = br.datapath
+        ofp = datapath.ofproto
+        ofpp = datapath.ofproto_parser
+        match = ofpp.OFPMatch(eth_type=ether.ETH_TYPE_ARP,
+                              arp_op=arp.ARP_REQUEST)
+        actions = [ofpp.OFPActionOutput(ofp.OFPP_CONTROLLER)]
+        instructions = [
+            ofpp.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions)]
+        msg = ofpp.OFPFlowMod(datapath,
+                              table_id=constants.PATCH_LV_TO_TUN,
+                              priority=10,
+                              match=match,
+                              instructions=instructions)
+        self.ryu_send_msg(msg)
+
     def _tun_br_goto_table_ucast_unicast(self, br):
         match = br.ofparser.OFPMatch(eth_dst=('00:00:00:00:00:00',
                                               '01:00:00:00:00:00'))
@@ -866,6 +1041,7 @@ class OFANeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
             table_id=constants.UCAST_TO_TUN)]
         msg = br.ofparser.OFPFlowMod(br.datapath,
                                      table_id=constants.PATCH_LV_TO_TUN,
+                                     priority=0,
                                      match=match,
                                      instructions=instructions)
         self.ryu_send_msg(msg)
@@ -877,6 +1053,7 @@ class OFANeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
             table_id=constants.FLOOD_TO_TUN)]
         msg = br.ofparser.OFPFlowMod(br.datapath,
                                      table_id=constants.PATCH_LV_TO_TUN,
+                                     priority=0,
                                      match=match,
                                      instructions=instructions)
         self.ryu_send_msg(msg)
@@ -946,6 +1123,7 @@ class OFANeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
         self.ryu_send_msg(msg)
 
         self._tun_br_sort_incoming_traffic_depend_in_port(self.tun_br)
+        self._tun_br_output_arp_packet_to_controller(self.tun_br)
         self._tun_br_goto_table_ucast_unicast(self.tun_br)
         self._tun_br_goto_table_flood_broad_multi_cast(self.tun_br)
         self._tun_br_set_table_tun_by_tunnel_type(self.tun_br)
