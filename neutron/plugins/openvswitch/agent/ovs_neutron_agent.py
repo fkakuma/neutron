@@ -114,7 +114,7 @@ class OVSSecurityGroupAgent(sg_rpc.SecurityGroupAgentRpcMixin):
 
 
 class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
-                      l2population_rpc.L2populationRpcCallBackMixin):
+                      l2population_rpc.L2populationRpcCallBackOvsMixin):
     '''Implements OVS-based tunneling, VLANs and flat networks.
 
     Two local bridges are created: an integration bridge (defaults to
@@ -320,51 +320,15 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
 
     def fdb_add(self, context, fdb_entries):
         LOG.debug(_("fdb_add received"))
-        for network_id, values in fdb_entries.items():
-            lvm = self.local_vlan_map.get(network_id)
-            if not lvm:
-                # Agent doesn't manage any port in this network
-                continue
-            agent_ports = values.get('ports')
-            agent_ports.pop(self.local_ip, None)
-            if len(agent_ports):
-                self.tun_br.defer_apply_on()
-                for agent_ip, ports in agent_ports.items():
-                    # Ensure we have a tunnel port with this remote agent
-                    ofport = self.tun_br_ofports[
-                        lvm.network_type].get(agent_ip)
-                    if not ofport:
-                        remote_ip_hex = self.get_ip_in_hex(agent_ip)
-                        if not remote_ip_hex:
-                            continue
-                        port_name = '%s-%s' % (lvm.network_type, remote_ip_hex)
-                        ofport = self.setup_tunnel_port(port_name, agent_ip,
-                                                        lvm.network_type)
-                        if ofport == 0:
-                            continue
-                    for port in ports:
-                        self._add_fdb_flow(port, lvm, ofport)
-                self.tun_br.defer_apply_off()
+        self.fdb_add_ovs(context, fdb_entries,
+                         self.local_vlan_map, self.local_ip, self.tun_br,
+                         self.tun_br_ofports, True)
 
     def fdb_remove(self, context, fdb_entries):
         LOG.debug(_("fdb_remove received"))
-        for network_id, values in fdb_entries.items():
-            lvm = self.local_vlan_map.get(network_id)
-            if not lvm:
-                # Agent doesn't manage any more ports in this network
-                continue
-            agent_ports = values.get('ports')
-            agent_ports.pop(self.local_ip, None)
-            if len(agent_ports):
-                self.tun_br.defer_apply_on()
-                for agent_ip, ports in agent_ports.items():
-                    ofport = self.tun_br_ofports[
-                        lvm.network_type].get(agent_ip)
-                    if not ofport:
-                        continue
-                    for port in ports:
-                        self._del_fdb_flow(port, lvm, ofport)
-                self.tun_br.defer_apply_off()
+        self.fdb_remove_ovs(context, fdb_entries,
+                            self.local_vlan_map, self.local_ip, self.tun_br,
+                            self.tun_br_ofports, True)
 
     def _add_fdb_flow(self, port_info, lvm, ofport):
         if port_info == q_const.FLOODING_ENTRY:
@@ -404,15 +368,6 @@ class OVSNeutronAgent(sg_rpc.SecurityGroupAgentRpcCallbackMixin,
             self.tun_br.delete_flows(table=constants.UCAST_TO_TUN,
                                      dl_vlan=lvm.vlan,
                                      dl_dst=port_info[0])
-
-    def fdb_update(self, context, fdb_entries):
-        LOG.debug(_("fdb_update received"))
-        for action, values in fdb_entries.items():
-            method = '_fdb_' + action
-            if not hasattr(self, method):
-                raise NotImplementedError()
-
-            getattr(self, method)(context, values)
 
     def create_rpc_dispatcher(self):
         '''Get the rpc dispatcher for this manager.
